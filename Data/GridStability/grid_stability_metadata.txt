@@ -1,0 +1,15 @@
+electrical grid stability dataset
+
+tau1 - reaction time, energy producer
+tau2 - reaction time, consumer 1
+tau3 - reaction time, consumer 2
+tau4 - reaction time, consumer 3
+p1 - power balance, energy producer
+p2 - power balance, consumer 1
+p3 - power balance, consumer 2
+p4 - power balance, consumer 3
+g1 - price elasticity coefficient gamma, energy producer
+g2 - price elasticity coefficient gamma, consumer 1
+g3 - price elasticity coefficient gamma, consumer 2
+g4 - price elasticity coefficient gamma, consumer 3
+stabf - system's stability label

@@ -1,0 +1,211 @@
+---
+title: "Project 2"
+author: "Steven Pham"
+date: "Weds Dec 8th"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+require("knitr")
+sourcedir <- "~/Documents/4021/R Code"
+datadir <- "~/Documents/4021/Data/"
+opts_knit$set(root.dir = sourcedir)
+library(forecast)
+library(imputeTS)
+library(ggplot2)
+library(lubridate)
+library(tidyverse)
+library(ggfortify)
+library(ggpubr)
+library(tseries)
+```
+
+# Load data and impute missing values 
+### Comment: I changed the column names to NO2 and time & created a time series model NO2.ts
+
+```{r cars }
+setwd(datadir)
+
+airquality = read.csv('AirQualityUCI.csv')
+
+# replace -200 with NA
+airquality[airquality == -200] <- NA
+
+# convert integer type to numeric
+intcols = c(4,5,7,8,9,10,11,12)
+for(i in 1:length(intcols)){
+  airquality[,intcols[i]] <- as.numeric(airquality[,intcols[i]])
+}
+
+setwd(sourcedir)
+
+# create new data frame with just NO2 and impute missing values
+AQdata = airquality["NO2.GT."]
+AQdata = na_interpolation(AQdata)
+
+# aggregate to daily maxima for model building
+dailyAQ <- aggregate(AQdata, by=list(as.Date(airquality[,1],"%m/%d/%Y")), FUN=max)
+
+colnames(dailyAQ) <- c("time" , "NO2")
+
+
+# create time series of NO2
+NO2.ts <- ts(dailyAQ[,2])
+```
+
+
+# Modeling Seasonality
+
+## Create a model NO2.trendseason and plot the NO2 fitted values to actual values
+###Comment: I created a linear model NO2.trendseason, plotted the fitted values of the linear model as a trendline.
+```{r}
+NO2.trendseason <- lm(NO2 ~ time, data = dailyAQ)
+summary(NO2.trendseason)
+
+ggplot(dailyAQ , aes(x = time , y=NO2)) + geom_line() + ylab("True daily averaged NO2 concentration in ppb") + geom_line(aes(x=time , y = NO2.trendseason$fitted.values), color="red")
+
+
+```
+### Takeaway: Linear Model NO2.trendseason is a significant model and time is significant to the NO2 concentration. The graph shows a linear increase which suggest that the model is non-stationary. There are two choices, build a residual model or a first difference model. 
+
+
+## Create diagnostic plots for NO2.trendseason
+```{r}
+autoplot(NO2.trendseason, labels.id = NULL)
+```
+#### Takeaway: Here I confirm that the linear model is valid before continuing with the time series analysis. Residual vs. fitted graph suggests the mean is not constant, QQ plot looks good with a couple of outlier points. 
+
+## Spectral Analysis
+### Comment: I created a periodogram, found the max omega and period
+```{r}
+NO2.pg <- spec.pgram(NO2.ts , spans=9 , demean=T , log="no")
+NO2.spec <- data.frame(freq=NO2.pg$freq , spec=NO2.pg$spec)
+ggplot(NO2.spec) + geom_line(aes(x=freq , y=spec)) + ggtitle("Smooth Periodogram of NO2 concentration ") + xlab("Frequency") + ylab("Squared Amplitude")
+
+max.omega <- NO2.pg$freq[which(NO2.pg$spec==max(NO2.pg$spec))]
+max.omega
+1/max.omega
+
+
+sorted.spec <- sort(NO2.pg$spec, decreasing=T, index.return=T)
+sorted.omegas <- NO2.pg$freq[sorted.spec$ix]
+sorted.Ts <- 1/NO2.pg$freq[sorted.spec$ix]
+sorted.omegas[1:20]
+sorted.Ts[1:20]
+
+```
+#### Takeaway: There is definitely noticeable peaks in the smaller frequency that can indicate seasonality. What's odd is that the peak frequency is 0.005 which makes the corresponding period 200 days. Once we sort the peak from greatest to smallest, one thing to notice is that the strong peaks have periods of at least 2 months (60+ days) which could be due to red noise. It is likely that the model will have autoregressive components 
+
+
+# Choosing the Ideal Model
+
+##Residual or first difference Model? 
+```{r}
+e.ts.NO2 <- ts(NO2.trendseason$residuals)
+autoplot(e.ts.NO2)
+
+
+NO2.trendseason.acf <- ggAcf(diff(NO2.ts))
+NO2.trendseason.pacf <- ggPacf(diff(NO2.ts))
+
+
+NO2.acf <- ggAcf(e.ts.NO2)
+NO2.pacf <- ggPacf(e.ts.NO2)
+ggarrange(NO2.trendseason.acf , NO2.trendseason.pacf ,NO2.acf,NO2.pacf,nrow=2,ncol=2)
+
+```
+#### Takeaway: The first different model is very different and is not what we are looking for. With regards to the residual model, ACF shows sinusoidal decay , PACF cuts off after 1 lag, not significant. Based on the ACF and PACF alone, I would try a ARMA(3,0). The acf and pacf is an indicator that the residual model is the ideal one. 
+
+## Auto.arima model
+
+```{r}
+auto = auto.arima(e.ts.NO2,approximation = FALSE)
+summary(auto)
+
+auto2 = auto.arima(NO2.ts,approximation = FALSE)
+summary(auto2)
+
+auto3 = auto.arima(diff(NO2.ts) , approximation = FALSE)
+summary(auto3)
+
+```
+
+#### Takeaway: Auto.arima shows ARIMA(2,0,1) is best for the residual model, ARIMA(1,1,1) is best for regular model. And for fun, ARIMA(1,0,1) is best for first difference model. The models with the lowest AIC are ARIMA(1,1,1) and ARIMA(1,0,1), despite the residual model being the ideal stationary model.
+
+```{r}
+ggtsdiag(auto,gof.lag=20)
+ggtsdiag(auto2,gof.lag=20)
+ggtsdiag(auto3,gof.lag=20)
+
+```
+
+#### Takeaway: The dignostic plot is the same for each model and good for about 6 lags. At this point I am more confident in using the residual model despite the AIC is slightly higher, given what we know about the data and its non stationary nature, using the residual model accounts for the non stationary. This concludes part 1 of the analysis.
+
+
+
+# Part 2: Forecast and Prediction
+```{r}
+
+#residual
+next.365days <- c((length(e.ts.NO2)-364):(length(e.ts.NO2)))
+next.365 <- data.frame(time.temp = next.365days, temp = e.ts.NO2[next.365days])
+next.365.ts <- e.ts.NO2[next.365days]
+
+time.temp <- c(1:(length(e.ts.NO2)-365))
+NO2.lm <- lm(e.ts.NO2[time.temp]~time.temp)
+summary(NO2.lm)
+
+E_Y.pred <- predict(NO2.lm, newdata=next.365)
+e_t.pred <- forecast(auto, h=365)
+next.365days.prediction <- E_Y.pred + e_t.pred$mean
+
+mean((next.365days.prediction-next.365$temp)^2)
+
+#first diff
+E_Y.pred <- predict(NO2.lm, newdata=next.365)
+e_t.pred <- forecast(auto3, h=365)
+next.365days.prediction <- E_Y.pred + e_t.pred$mean
+
+mean((next.365days.prediction-next.365$temp)^2)
+
+
+time.predictions <- dailyAQ$time[(length(time.temp)+1) : (length(time.temp)+365)]
+
+
+ggplot() + geom_line(aes(x=time.predictions,y=next.365$temp),color="black") + 
+  geom_line(aes(x=time.predictions,y=next.365days.prediction),color="red") + 
+  geom_line(aes(x=time.predictions,y=E_Y.pred + e_t.pred$lower[,2]),
+            color="red",linetype="dashed") + 
+  geom_line(aes(x=time.predictions,y=E_Y.pred + e_t.pred$upper[,2]),
+            color="red",linetype="dashed") 
+```
+#### Takeaway: The MSE of the residual model is 171,152.6, a very high number which is given since we are predicting 365 points. Compared to the MSE of first difference model 171,099.9, slightly less.  The graph is incorrect in that the black line is from actual data whereas the red line is the prediction data beyond april 2005.
+
+```{r}
+set.seed(5)
+auto.sim <- arima.sim(n=365, list(ar=c(auto$coef[1],auto$coef[2]),
+                                      ma=c(auto$coef[3])),
+                        sd=sqrt(auto$sigma2))
+next.year <- c(1:365)
+next.yr <- data.frame(time.temp = next.year)
+
+next.yr.pred <- predict(NO2.lm , newdata = next.yr)
+
+autoplot(ts(next.yr.pred + auto.sim))
+
+mean(ts(next.yr.pred + auto.sim))
+var(ts(next.yr.pred + auto.sim))
+
+
+mean(e.ts.NO2)
+var(e.ts.NO2)
+
+ggAcf(ts(next.yr.pred + auto.sim))
+ggPacf(ts(next.yr.pred + auto.sim))
+
+next365.lm <- lm(ts(next.yr.pred + auto.sim)~next.year)
+summary(next365.lm)
+```
+#### Takeaway: The model is significant and its prediction is the NO2 level will decrease. Oddly enough, the mean and variance of the prediction model is very different from the residual model and the ACF is linearly decaying. I am questioning the validity of this simulation model.

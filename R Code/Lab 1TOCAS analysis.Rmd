@@ -1,0 +1,440 @@
+---
+title: "FRA Recommendations for Reducing Severity of Accident Damage and Casualties"
+author: "Steven Pham, Emir Sahin"
+output: pdf_document
+---
+# Setting Up
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(devtools) 
+library(ggbiplot)
+library(GGally)
+library(MASS)
+library(lindia)
+library(ggfortify)
+
+traindir <- "~/Documents/4021/Data/TrainData"
+sourcedir <-"~/Documents/4021/R Code"
+setwd(sourcedir)
+source("AccidentInput.R")
+acts <- file.inputl(traindir)
+totacts <- combine.data(acts)
+totacts$TOTCAS <- totacts$TOTKLD + totacts$TOTINJ
+tocas <- totacts[totacts$TOTCAS > 1 ,]
+```
+
+# Getting & Removing Extreme Casualties
+In order to explore the cause of casualties in train accidents, we need to take a look at the extremes. In this case, extreme casualties are considered any accidents that have 1 or more causalties in there.
+
+While doing so, we check for any outliers - which is an accident with 1001 casualties that is hazmat related.
+```{r}
+tt<-totacts[totacts$TOTCAS > 1,]
+which.max(tt$TOTCAS)
+tt[86,c("TOTCAS")] #outlier
+tocas <- totacts[totacts$TOTCAS > 1,]
+tocas <- tocas[-86,]
+rownames(tocas) <- NULL
+```
+# Determining Hypothesis
+## Variable Exploration
+In order to determine predictors of total casualties we explored the various variables in our dataset. The main reason for this was to target our exploration to a certain area and, also, that we couldn't run ggpairs over all the variables.
+
+During our exploration we decided that the following could be correlated to the number of casualties:
+
+*TRNSPD - Refers to Train Speed. 
+
++We assumed a train 'crashing' at faster speeds is likely to cause more harm.
+
+
+*TONS - Refers to gross tonnage.
+
++We assumed that the weight of the train may cause more harm since it travels as a greater .
+
+
+*LOADED1 - Refers to cars being loaded or not
+
++This is a little related to TONS but the idea is, if the cars are loaded they may cause more harm.
+
+
+*TYPTRK - Refers to type of track that the train was on.
+
++We thought that there could be some correlation between the track type and casualties number.
+
+
+*DRUG - Refers to the number of positive drug tests.
+
++People under the influence can cause more casulaties.
+
+
+*ALCOHOL - Refers to the number of positive alcohol tests.
+
++Same as drugs.
+
+
+*PASSTRN - Refers to the train being a passenger train or not.
+
++We're assuming this will be relevant as we're likely to get less causalties in non-passenger trains
+
+
+*CAUSE - Refers to the cause of accident.
+
++The reason the train 'crashed' can affect the number of casualties was our assumption.
+
+
+*TYPE - Refers to the type of accident the train went through.
+
++The type of accident is likely to affect the number
+
+
+*LOADP1 - Refers to the number of loaded passenger cars in the train.
+
++We felt like this should be related as the number of passengers would increase the total number of casualties in case of a crash.
+
+
+Then, we made various correlation matrices to see which one is the best predictors of total casualties.
+```{r, echo= FALSE}
+fdcas <-tocas[,c("TRNSPD","CARSDMG","TONS","LOADED1", "TYPTRK", "ACCDMG", "TOTCAS")]
+fdcas$TYPTRK <- as.factor(fdcas$TYPTRK)
+ggpairs(fdcas)
+```
+Looking at the graph, we can see that most things are not heavily correlated with total casualties other than ACCDMG. It is indicated that TRNSPD and TONS are significant, however.
+```{r, echo= FALSE}
+#Drug or alcohol use have no effect
+ppcas <-tocas[,c("DRUG", "ALCOHOL", "PASSTRN", "CAUSE", "TYPE","LOADP1", "ACCDMG", "TOTCAS")]
+ppcas$CAUSE <- substr(ppcas$CAUSE,1,1)
+ppcas$TYPE <- as.factor(ppcas$TYPE)
+ggpairs(ppcas)
+```
+
+
+It looks like, again, most things don't have a direct correlation with total casualties other than LOADP1. Let's take a closer look at whether or not it's a PASSTRN.
+```{r}
+ggplot(ppcas, aes(PASSTRN, TOTCAS)) + geom_boxplot()
+```
+It does look like there are some differences within PASSTRN.
+Let's look at TYPE
+```{r}
+ggplot(ppcas, aes(TYPE, TOTCAS)) + geom_boxplot()
+
+table(ppcas$TYPE) #Highway and Derailment has the highest number of occurances
+```
+One looks like it makes a difference and it's derailment. 7 is highway crossing, so it means the train accident involves exterior parties. We want to include these.
+ 
+
+
+
+## Hypothesis
+1) Number of casualties (does not) increase when a highway-rail crossing accidents happens due to a passenger train.
+
+2) The number casualties (does not) increase when caused by human errors 
+
+
+# Hypothesis 1 Exploration
+The reason that we have this specific hypothesis is to see how passenger trains effect the number of casualties in a highway-rail crossing crash. It should be kept in mind that the number of casualties does include pedestrians and people in vehicles hence the possibility of this hypothesis going either way.
+## Preparation
+We adjust the data a little bit to make a proper model. 
+Here, we get rid of the N/A occurrances under PASSTRN.
+```{r}
+tocas <- tocas[!(is.na(tocas$PASSTRN) | tocas$PASSTRN==""), ]
+table(tocas$PASSTRN) #We can see that the issue is fixed
+```
+Here, we'll make a new variable called TYPA that only includes Derailment and Highway-Crossing (two highest occurrences.)
+```{r}
+TYPA <-rep(0, nrow(tocas))
+TYPA[which(tocas$TYPE == 1)] <- 1 #derailment
+TYPA[which(tocas$TYPE == 7)] <- 2 #highway
+TYPA <- as.factor(TYPA)
+tocas$TYPA <- TYPA
+#tocas$TYPA
+```
+Finally, we adjust cause to only the first letter
+```{r}
+tocas$CAUSE <- substr(tocas$CAUSE,1,1)
+```
+## Building a Linear Model
+### Building the Main and Interaction Models
+Initially, we want to include PASSTRN, TRNSPD, and LOADP1 in the model. This is because two of these variables are based on our hypothesis and the others have a good correlation with TOTCAS. However, it's likely that LOADP1 and PASSTRN and linearly related... Either way, we can build a model and test this.
+
+First, we build the main effects model...
+```{r}
+cas.lm1 <- lm(TOTCAS ~ PASSTRN + TRNSPD + TYPA + LOADP1 , data=tocas)
+summary(cas.lm1)
+```
+Then, we build the main effects + intersection model
+```{r}
+cas.lm1.int <- lm(TOTCAS ~ (PASSTRN + TRNSPD + TYPA + LOADP1)^2 , data=tocas)
+summary(cas.lm1.int)
+```
+Here, we can see that LOADP1 is linearly related to PASSTRN. This makes sense as the number of loaded passenger trains will depend on whether or not the train is a passenger train or not.
+
+Keeping this in mind, we remove it from our model:
+```{r}
+cas.lm1 <- lm(TOTCAS ~ PASSTRN + TRNSPD + TYPA , data=tocas)
+summary(cas.lm1)
+```
+Model and all the variables inside of it seems to be statistically significant at the .05 level.
+We can see that the adjusted R^2 didn't change at all. So, we make the interaction model as well...
+```{r}
+cas.lm1.int <- lm(TOTCAS ~ (PASSTRN + TRNSPD + TYPA)^2 , data=tocas)
+summary(cas.lm1.int)
+```
+This does bring some difference into our previous model. So, let's check to see which one is the better model before moving on.
+```{r}
+anova(cas.lm1, cas.lm1.int)
+```
+According to our results, our partial F-test rejected the null hypothesis, meaning that the interaction model is a more comprehensive model than our main model.
+Let's take another look at our interaction model:
+```{r}
+summary(cas.lm1.int)
+```
+Looks like PASSTRN, TYPA1, PASSTRN:TRNSPD, PASSTRN:TYPA2, TRNSPD:TYPA2 are significant. Keep in mind that our hypothesis is based upon the the PASSTRN:TYPA2 interaction.
+### Normal vs Stepwise
+In order to get the best model possible, it's a good idea to compare the stepwise model with the current model at hand.
+So, we make a stepwise modeL:
+```{r}
+cas.lm1.step<- step(cas.lm1.int, trace=F)
+summary(cas.lm1.step)
+```
+It does look like there is no difference between the stepwise and the interaction model. So, we just continue with the interaction model.
+### Current Results with our Model
+```{r}
+summary(cas.lm1.int)
+```
+Looking at our model, we can interpret the following (with statistical significance):
+*A passenger train will increase the number of casualties by ~9 in OTHER type of accidents.
+*Derailment accidents decreases the number of casualties by ~12.
+*A passenger train that is going faster will result in a higher number of casualties.
+*Number of casualties decrease by 14 when a highway-rail accident is caused by a passenger train.
+*On a derailment accident, a faster train will result in higher casualties.
+
+### Diagnostics of our Model
+```{r}
+plot(cas.lm1.int)
+```
+Looking at the diagnostics plots we can intepret the following:
+*Residual vs Fitted
++The model has a non-constant variance
++The model isn't perfect fit
+*QQ
++The model is not gaussian at either tail - especially the higher one
+*Residual vs Leverage
++There two influential points: 872 and 1058
+
+We can see that our model is far from perfect - this is, also, easily interpret-able from the very low adjusted R^2 value of the model.
+## Model Adjustment
+This part here is to adjust the model in order to make it a better fit.
+### Removing Influential Points
+We want to get rid of 872 and 1058 as they are highly influential.
+```{r}
+tocas$TOTCAS[867]
+tocas$TOTCAS[1053]
+updcas <- tocas[-c(867,1053),]
+```
+Now, we should rebuild the model...
+```{r}
+cas.lm2.int <- lm(TOTCAS ~ (PASSTRN + TRNSPD + TYPA)^2, data=updcas)
+summary(cas.lm2.int)
+```
+This seems to have increased our R-squared by quite a bit.
+And the diagnostic plots:
+```{r}
+plot(cas.lm2.int)
+```
+While the model is still off, we can say that we got rid of the influential points.
+So, we go onto the next step:
+### Transformation
+We will only consider log and boxcox transformations here.
+First, we create the boxcox plot:
+```{r}
+gg_boxcox(cas.lm2.int) #lambda is between -1.4 and -1.3
+```
+It does look like we shouldn't do a log transformation and, rather a boxcox transformation. Though, it's likely that we will need another method of transformation as boxcox plot does look off.
+We get the boxcox value and check our step version of the model as well.
+```{r}
+L <- boxcox(cas.lm2.int, plotit = F)$x[which.max(boxcox(cas.lm2.int, plotit = F)$y)] 
+cas.box <- lm(((TOTCAS^L -1)/L) ~ (PASSTRN + TRNSPD + TYPA)^2, data=updcas)
+cas.box.step <- step(cas.box)
+anova(cas.box.step, cas.box) #higher than .05 so we go for the smaller step
+summary(cas.box)
+summary(cas.box.step)
+```
+We use our step model as it is a smaller model which gets rid of PASSTRN:TRNSPD indicating that number of casualties due to trainspeed won't differ between passenger and non-passenger trains.
+Then, we use diagnostic plots:
+```{r}
+plot(cas.box.step)
+```
+This is what we infer from the diagnostic plots:
+*Residual vs Fitted:
++There is a large pattern and the variance is not constant
+*QQ
++Tails seems to be more normal than the initial model however, still not properly normal
+*Residual vs Leverage:
++No outliers or influential points.
+## Determining the Best Model to Use
+All the models we have used are far from perfect. The transformed model has a bad Residual vs Fitted graph, meaning that we want to avoid a pattern and move to the inital model. However, there is a sweetspot between the two where we removed the outliers.
+
+So, we will be using: cas.lm2.int However, we want to check it against a stepwise version of the same model to determine the final model to use for our hypothesis...
+```{r}
+cas.lm2.step <- step(cas.lm2.int, trace=F)
+summary(cas.lm2.step)
+```
+It looks like there isn't a difference between the stepwise and the intereaction model. Hence, we just use the interaction model.
+# Concluding the Hypothesis
+```{r}
+summary(cas.lm2.int)
+```
+Looking at the summary of our model, we can see that PASSTRNY:TYPA2 is significant with a coefficient of ~-12. This indicates that the number of casualties at a highway-rail intersection of a passenger train is less than that of a non-passenger train.
+
+
+# Hypothesis 2
+
+We hypothesize that the number casualties is greater in accidents caused by human error. 
+
+H0: The number of casualty increases when an accident is caused by a human error.
+
+HA: The number of casualty does not increase when an accident is caused by a human error.
+
+
+## Variable Exploration (PCA) & Preparation
+To test this hypothesis, we compare the number of casualty of miscellaneous, track, signal, and electrical/mechanical causes versus the number of casualty in accident caused by human error. Initially, we chose not to include miscellaneous since it is too ambiguous. However, after looking at the number of accidents of each cause, we chose to include miscellaneous accident causes since there are only 39 observations of electrical and signal causes compared to 330 observations of human error. This way there would be sufficient observations for comparison.
+
+
+```{r}
+Cause <- rep(NA, nrow(tocas))
+Cause[which(substr(tocas$CAUSE, 1, 1) == "M")] <- "M"  ##Miscellaneous
+Cause[which(substr(tocas$CAUSE, 1, 1) == "T")] <- "T"  ##Track
+Cause[which(substr(tocas$CAUSE, 1, 1) == "S")] <- "S"  ##Signal or communication
+Cause[which(substr(tocas$CAUSE, 1, 1) == "H")] <- "H"  ##Human
+Cause[which(substr(tocas$CAUSE, 1, 1) == "E")] <- "E"  ##Electrical or mechanical
+# This new variable, Cause, has to be a factor
+Cause <- as.factor(Cause)
+tocas$Cause <- Cause
+table(Cause)
+```
+As seen in the cause table, the majority of casualty is caused by miscellaneous issues follow by human factors. We chose to analyze the relationship between human-caused accidents since the miscellaneous causes are ambiguous. 
+
+
+We create a new column that highlights human error caused accidents and grouped all other causes as 0.
+```{r}
+
+HumanE <- rep(0, nrow(tocas))
+HumanE[which(tocas$Cause == "H")] <- "H" 
+HumanE <- as.factor(HumanE)
+tocas$HumanE <- HumanE
+#tocas$HumanE
+table(tocas$HumanE)
+```
+The table shows that there are 330 human caused accidents and 992 other caused accidents. We will be using this in our correlation matrices and linear model.
+
+```{r, echo= FALSE}
+#we create a data frame with total casualties (TOTCAS) and a hand-picked selection of variables including hazmat related variables
+tocas.data <- subset(tocas,select = c("TOTCAS","CARS","CARSDMG","CARSHZD","TRNSPD","DRUG","ALCOHOL","HumanE"))
+
+#Principal component analysis to find predictors of total casualties
+ggpairs(tocas.data)
+```
+We chose not do include a principal component analysis because of the numerous qualitative variables (HumanE, TYPE, LOADED1, and TYPTRK) which would require a non-linear principal component analysis for these discrete variables. Instead, we built a linear mode using Cause , TONS, TRNSPD ,and TYPE.
+
+
+### Building a Linear Model
+
+*Note the following are the types of accident:
+01= derailment
+02= head on collision 
+03= rearend collision 
+04= side collision
+05= raking collision
+06= broken train collision 
+07= hwy-rail crossing
+08= RR Grade Crossing 
+09= obstruction
+10= explosive –detonation
+11= fire / violent rupture
+12= other impacts
+13= other (described in narrative)
+
+```{r}
+tocas.allcause<- lm(TOTCAS~ HumanE + TONS + TRNSPD , data=tocas)
+summary(tocas.allcause)
+```
+
+### Building the Main and Interaction Models
+Then we create a main effects and interaction model
+
+```{r}
+tocas.allcause.int <- lm(TOTCAS~ (HumanE + TONS + TRNSPD  )^2, data=tocas)
+summary(tocas.allcause.int)
+```
+Our adjusted r-squared value increased from 0.0227 to 0.0959. The following relationships are significant to total casualties: HumanE:TONS , HumanE:TRNSPD, and TONS:TRNSPD
+```{r}
+anova(tocas.allcause, tocas.allcause.int)
+```
+Our partial F-test rejected the null hypothesis, meaning that the main effect + interactions model is a more comprehensive model than our main model.
+
+### Diagnostic Plots
+Let's look at our diagnostic plots for the main effect + interactions 
+
+
+```{r}
+plot(tocas.allcause.int)
+```
+Per the residuals vs. fitted plot, we have a lack of fit and a nonconstant variance and the QQ plots show that the model does not follow a Gaussian distributions.
+Therefore we must do a power transformation.
+
+```{r}
+gg_boxcox(tocas.allcause.int)
+
+L <- boxcox(tocas.allcause.int, plotit = F)$x[which.max(boxcox(tocas.allcause.int, plotit = F)$y)]
+L
+```
+Because we have a negative lambda value, instead of transforming TOTCAS^L, we must transform it to ((TOTCAS^L -1)/L)
+
+```{r}
+tocas.allcause.transf <- lm(((TOTCAS^L -1)/L) ~ (HumanE + TONS + TRNSPD)^2, data=tocas)
+summary(tocas.allcause.transf)
+```
+Our adjusted r squared value has increased to 0.1101. Let's use a stepwise function to find the best model
+```{r}
+tocas.allcause.transf.step <- step(tocas.allcause.transf)
+
+summary(tocas.allcause.transf)
+summary(tocas.allcause.transf.step)
+
+anova(tocas.allcause.transf.step,tocas.allcause.transf)
+
+```
+Based on the ANOVA test,  we conclude that the transformation model is more accurate than the stepwise model. Meaning that the number of casualties due to TONS will not differ base on whether the accident is caused by human error or not.
+
+
+Let's look at the diagnostic plots now that we have transformed our model
+```{r}
+plot(tocas.allcause.transf)
+```
+*Residual vs Fitted:
++There is a large pattern and the variance is not constant
+*QQ
++Tails seems to be more normal than the initial model however, still not properly normal
+*Residual vs Leverage:
++No outliers or influential points.
+
+## Conclusion
+
+```{r}
+summary(tocas.allcause.transf)
+```
+Based on our model, we see that HumanEH is not significant to TOTCAS nor its interactions with TONS and TRNSPD, therefore we conclude that the number of casualty does not increase when an accident is caused by a human error.
+
+
+# Recommendations
+We make the following recommendations to the FRA:
+
+While the results seem rather unintuitive for the results, there may be various reasons for it to be the case. For example, it is quite likely that passenger trains tend to be more ‘protected’ and hence, could be avoiding the railway crossings. Another thing to keep in mind is that the casualties could increase due to the ‘cargo’ of the train which a passenger train may not carry.
+
+Either way, a good suggestion to avoid these kind of accidents at all is to make sure that both the train and the drivers know that there will be a crossing and follow the rules of conduct in such cases. Means to block traffic should be used in all of the scenarios. If possible, intersections should be avoided as much as possible.
+
+A final thought on the this hypothesis is that the model created is rather lackluster. It’s likely that the results would change if a better linear model was used that could properly indicate the effects of passenger trains on highway-rail crossings. The accidents labeled miscellaneous is very ambiguous. One recommendation we can make to the FRA is to eliminate the miscellaneous causes (or reduce labeling the majority of accidents as miscellaneous) and create more categories in causes, so that there are sufficent information for further analysis. 
+
+
+
+
